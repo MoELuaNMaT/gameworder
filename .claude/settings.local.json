@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(test:*)",
+      "Bash(dir:*)",
+      "Bash(cmd /c \"dir F:\\\\GameWorder\")",
+      "Bash(cat:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(npm:*)",
+      "Bash(npx create-vite@latest:*)",
+      "Bash(npx shadcn@latest init:*)",
+      "Bash(pkill:*)",
+      "mcp__duckduckgo-search__search",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_snapshot",
+      "mcp__playwright__browser_close",
+      "WebSearch",
+      "Bash(timeout /t 10 /nobreak:*)",
+      "Bash(cmd /c dir:*)"
+    ]
+  }
+}
