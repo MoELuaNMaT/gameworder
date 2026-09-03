@@ -1,3 +1,4 @@
+# trigger-2
 name: Temporary Bilibili Bridge
 
 on:
@@ -20,7 +21,7 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          pip install -U yt-dlp
+          pip install -U yt-dlp pillow
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 
@@ -31,19 +32,13 @@ jobs:
           mkdir -p bridge_out/frames
           URL='https://www.bilibili.com/video/BV1gJK2zmEa6/'
           yt-dlp --dump-single-json "$URL" > bridge_out/metadata.json
-
-          # Prefer creator/platform subtitles. Do not fail if none are exposed.
           yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs 'zh-CN,zh-Hans,zh-Hant,ai-zh,danmaku' --sub-format 'vtt/srt/best' -o 'bridge_out/video.%(ext)s' "$URL" || true
-
-          # Download a modest-resolution copy so the agent can inspect the actual Illustrator operations shown on screen.
           yt-dlp -f 'bv*[height<=480]+ba/b[height<=480]/worst' --merge-output-format mp4 -o 'bridge_out/video.%(ext)s' "$URL"
           VIDEO=$(find bridge_out -maxdepth 1 -type f \( -name 'video.mp4' -o -name 'video.webm' -o -name 'video.mkv' \) | head -n1)
-
-          # One frame every 8 seconds, then combine into readable 4x4 contact sheets.
           ffmpeg -hide_banner -loglevel error -i "$VIDEO" -vf 'fps=1/8,scale=640:-2' -q:v 3 'bridge_out/frames/frame_%03d.jpg'
           python - <<'PY'
           from pathlib import Path
-          from PIL import Image, ImageOps, ImageDraw
+          from PIL import Image, ImageDraw
           frames=sorted(Path('bridge_out/frames').glob('frame_*.jpg'))
           cols,rows=4,4
           cell_w,cell_h=640,380
@@ -60,15 +55,10 @@ jobs:
                   d.text(((i%cols)*cell_w+8,y+cell_h-24),p.stem,fill='black')
               sheet.save(f'bridge_out/contact_{s//(cols*rows)+1:02d}.jpg',quality=88)
           PY
-
-          # Normalize any VTT/SRT subtitle into readable plain text with timestamps preserved in source files too.
           python - <<'PY'
           import re
           from pathlib import Path
-          subs=[]
-          for p in Path('bridge_out').glob('video.*'):
-              if p.suffix.lower() in {'.vtt','.srt'}:
-                  subs.append(p)
+          subs=[p for p in Path('bridge_out').glob('video.*') if p.suffix.lower() in {'.vtt','.srt'}]
           out=[]
           for p in subs:
               text=p.read_text('utf-8',errors='ignore')
@@ -85,7 +75,6 @@ jobs:
               out.append(f'\n===== {p.name} =====\n'+ '\n'.join(lines))
           Path('bridge_out/transcript.txt').write_text('\n'.join(out) if out else 'NO_SUBTITLE_EXPOSED',encoding='utf-8')
           PY
-
           echo '===== TRANSCRIPT START ====='
           cat bridge_out/transcript.txt
           echo '===== TRANSCRIPT END ====='
