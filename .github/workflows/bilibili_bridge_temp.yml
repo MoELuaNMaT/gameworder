@@ -1,0 +1,105 @@
+name: Temporary Bilibili Bridge
+
+on:
+  push:
+    paths:
+      - '.github/workflows/bilibili_bridge_temp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U yt-dlp
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Fetch metadata, subtitles, low-res video and visual contact sheets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p bridge_out/frames
+          URL='https://www.bilibili.com/video/BV1gJK2zmEa6/'
+          yt-dlp --dump-single-json "$URL" > bridge_out/metadata.json
+
+          # Prefer creator/platform subtitles. Do not fail if none are exposed.
+          yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs 'zh-CN,zh-Hans,zh-Hant,ai-zh,danmaku' --sub-format 'vtt/srt/best' -o 'bridge_out/video.%(ext)s' "$URL" || true
+
+          # Download a modest-resolution copy so the agent can inspect the actual Illustrator operations shown on screen.
+          yt-dlp -f 'bv*[height<=480]+ba/b[height<=480]/worst' --merge-output-format mp4 -o 'bridge_out/video.%(ext)s' "$URL"
+          VIDEO=$(find bridge_out -maxdepth 1 -type f \( -name 'video.mp4' -o -name 'video.webm' -o -name 'video.mkv' \) | head -n1)
+
+          # One frame every 8 seconds, then combine into readable 4x4 contact sheets.
+          ffmpeg -hide_banner -loglevel error -i "$VIDEO" -vf 'fps=1/8,scale=640:-2' -q:v 3 'bridge_out/frames/frame_%03d.jpg'
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageOps, ImageDraw
+          frames=sorted(Path('bridge_out/frames').glob('frame_*.jpg'))
+          cols,rows=4,4
+          cell_w,cell_h=640,380
+          for s in range(0,len(frames),cols*rows):
+              chunk=frames[s:s+cols*rows]
+              sheet=Image.new('RGB',(cols*cell_w,rows*cell_h),'white')
+              for i,p in enumerate(chunk):
+                  im=Image.open(p).convert('RGB')
+                  im.thumbnail((cell_w,cell_h-28))
+                  x=(i%cols)*cell_w+(cell_w-im.width)//2
+                  y=(i//cols)*cell_h
+                  sheet.paste(im,(x,y))
+                  d=ImageDraw.Draw(sheet)
+                  d.text(((i%cols)*cell_w+8,y+cell_h-24),p.stem,fill='black')
+              sheet.save(f'bridge_out/contact_{s//(cols*rows)+1:02d}.jpg',quality=88)
+          PY
+
+          # Normalize any VTT/SRT subtitle into readable plain text with timestamps preserved in source files too.
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          subs=[]
+          for p in Path('bridge_out').glob('video.*'):
+              if p.suffix.lower() in {'.vtt','.srt'}:
+                  subs.append(p)
+          out=[]
+          for p in subs:
+              text=p.read_text('utf-8',errors='ignore')
+              lines=[]
+              for ln in text.splitlines():
+                  if not ln.strip() or ln.startswith('WEBVTT') or re.fullmatch(r'\d+',ln.strip()):
+                      continue
+                  if '-->' in ln:
+                      lines.append('\n['+ln.strip()+']')
+                  else:
+                      clean=re.sub(r'<[^>]+>','',ln).strip()
+                      if clean:
+                          lines.append(clean)
+              out.append(f'\n===== {p.name} =====\n'+ '\n'.join(lines))
+          Path('bridge_out/transcript.txt').write_text('\n'.join(out) if out else 'NO_SUBTITLE_EXPOSED',encoding='utf-8')
+          PY
+
+          echo '===== TRANSCRIPT START ====='
+          cat bridge_out/transcript.txt
+          echo '===== TRANSCRIPT END ====='
+          ls -lah bridge_out bridge_out/frames
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-psd-to-ai-bridge
+          path: |
+            bridge_out/metadata.json
+            bridge_out/transcript.txt
+            bridge_out/*.vtt
+            bridge_out/*.srt
+            bridge_out/contact_*.jpg
+          if-no-files-found: warn
+          retention-days: 1
