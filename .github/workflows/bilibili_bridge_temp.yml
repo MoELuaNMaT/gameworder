@@ -165,43 +165,44 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          if grep -q '^NO_SUBTITLE_EXPOSED$' bridge_out/transcript.txt; then
-            python - <<'PY'
-            from faster_whisper import WhisperModel
-            from pathlib import Path
+          python - <<'PY'
+          from faster_whisper import WhisperModel
+          from pathlib import Path
 
-            model_name = 'small'
-            try:
-                model = WhisperModel(model_name, device='cpu', compute_type='int8')
-            except Exception:
-                model_name = 'base'
-                model = WhisperModel(model_name, device='cpu', compute_type='int8')
+          transcript_path = Path('bridge_out/transcript.txt')
+          if transcript_path.read_text(encoding='utf-8').strip() != 'NO_SUBTITLE_EXPOSED':
+              print('Bilibili subtitle exposed; ASR skipped.')
+              raise SystemExit(0)
 
-            segments, info = model.transcribe(
-                'bridge_out/audio.wav',
-                language='zh',
-                beam_size=5,
-                vad_filter=True,
-                condition_on_previous_text=True,
-                initial_prompt='五星地牢，Godot，Shader，着色器，噪声，火焰，骷髅，灵魂火焰，像素游戏，独立游戏开发。'
-            )
+          model_name = 'small'
+          try:
+              model = WhisperModel(model_name, device='cpu', compute_type='int8')
+          except Exception:
+              model_name = 'base'
+              model = WhisperModel(model_name, device='cpu', compute_type='int8')
 
-            lines = []
-            for seg in segments:
-                text = seg.text.strip()
-                if text:
-                    lines.append(f'[{seg.start:.2f}-{seg.end:.2f}] {text}')
+          segments, info = model.transcribe(
+              'bridge_out/audio.wav',
+              language='zh',
+              beam_size=5,
+              vad_filter=True,
+              condition_on_previous_text=True,
+              initial_prompt='五星地牢，Godot，Shader，着色器，噪声，火焰，骷髅，灵魂火焰，像素游戏，独立游戏开发。'
+          )
 
-            Path('bridge_out/transcript.txt').write_text('\n'.join(lines), encoding='utf-8')
-            Path('bridge_out/transcript_source.txt').write_text(
-                f'faster-whisper:{model_name}; language={info.language}; probability={info.language_probability:.4f}',
-                encoding='utf-8'
-            )
-            print('\n'.join(lines))
-            PY
-          else
-            echo "Bilibili subtitle exposed; ASR skipped."
-          fi
+          lines = []
+          for seg in segments:
+              text = seg.text.strip()
+              if text:
+                  lines.append(f'[{seg.start:.2f}-{seg.end:.2f}] {text}')
+
+          transcript_path.write_text('\n'.join(lines), encoding='utf-8')
+          Path('bridge_out/transcript_source.txt').write_text(
+              f'faster-whisper:{model_name}; language={info.language}; probability={info.language_probability:.4f}',
+              encoding='utf-8'
+          )
+          print('\n'.join(lines))
+          PY
 
       - name: Build compact report
         shell: bash
