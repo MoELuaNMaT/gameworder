@@ -1,8 +1,9 @@
-# trigger-3
-name: Temporary Bilibili Bridge
+name: Temporary Bilibili Reader BV1vGaT6FEMB
 
 on:
   push:
+    branches:
+      - 'tmp-bilibili-BV1vGaT6FEMB'
     paths:
       - '.github/workflows/bilibili_bridge_temp.yml'
   workflow_dispatch:
@@ -11,9 +12,9 @@ permissions:
   contents: read
 
 jobs:
-  fetch:
+  read-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,129 +22,215 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          pip install -U curl_cffi pillow
+          pip install -U curl_cffi pillow faster-whisper
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 
-      - name: Fetch through Bilibili API with browser impersonation
+      - name: Fetch video, subtitles, audio and frames
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p bridge_out/frames
+          mkdir -p bridge_out/frames bridge_out/chapters
+
           python - <<'PY'
           from curl_cffi import requests
           from pathlib import Path
-          import json, re, time
+          import json, time
 
-          bvid='BV1gJK2zmEa6'
-          out=Path('bridge_out')
-          headers={
-              'Referer':'https://www.bilibili.com/',
-              'Origin':'https://www.bilibili.com',
-              'Accept-Language':'zh-CN,zh;q=0.9,en;q=0.7',
+          bvid = 'BV1vGaT6FEMB'
+          cid = 42174056995
+          out = Path('bridge_out')
+          headers = {
+              'Referer': f'https://www.bilibili.com/video/{bvid}/',
+              'Origin': 'https://www.bilibili.com',
+              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
           }
-          s=requests.Session(impersonate='chrome')
+          s = requests.Session(impersonate='chrome')
 
-          def get_json(url, tries=4):
-              last=None
+          def get_json(url, tries=5):
+              last = None
               for i in range(tries):
-                  r=s.get(url, headers=headers, timeout=30)
-                  last=(r.status_code, r.text[:500])
-                  if r.status_code==200:
+                  r = s.get(url, headers=headers, timeout=40)
+                  last = (r.status_code, r.text[:500])
+                  if r.status_code == 200:
                       try:
-                          j=r.json()
-                          if j.get('code',0)==0:
+                          j = r.json()
+                          if j.get('code', 0) == 0:
                               return j
                       except Exception:
                           pass
-                  time.sleep(1.5*(i+1))
+                  time.sleep(1.5 * (i + 1))
               raise RuntimeError(f'GET failed {url}: {last}')
 
-          view=get_json(f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}')
-          (out/'metadata.json').write_text(json.dumps(view,ensure_ascii=False,indent=2),encoding='utf-8')
-          data=view['data']
-          cid=data['cid']
-          print('TITLE:',data.get('title'))
-          print('CID:',cid,'DURATION:',data.get('duration'))
+          # Metadata: pagelist is less likely to hit anti-bot than /view.
+          pages = get_json(f'https://api.bilibili.com/x/player/pagelist?bvid={bvid}&jsonp=jsonp')
+          (out / 'pagelist.json').write_text(json.dumps(pages, ensure_ascii=False, indent=2), encoding='utf-8')
 
-          # Subtitle metadata + bodies when exposed.
-          player=get_json(f'https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}')
-          (out/'player.json').write_text(json.dumps(player,ensure_ascii=False,indent=2),encoding='utf-8')
-          subs=((player.get('data') or {}).get('subtitle') or {}).get('subtitles') or []
-          transcript=[]
-          for idx,sub in enumerate(subs):
-              u=sub.get('subtitle_url') or ''
-              if u.startswith('//'): u='https:'+u
-              if not u: continue
-              r=s.get(u,headers=headers,timeout=30)
-              if r.status_code!=200: continue
-              p=out/f'subtitle_{idx:02d}.json'
+          # Player metadata contains subtitles + chapters.
+          player = get_json(f'https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}')
+          (out / 'player.json').write_text(json.dumps(player, ensure_ascii=False, indent=2), encoding='utf-8')
+          pdata = player.get('data') or {}
+          chapters = pdata.get('view_points') or []
+          (out / 'chapters.json').write_text(json.dumps(chapters, ensure_ascii=False, indent=2), encoding='utf-8')
+
+          # Try exposed subtitle tracks first.
+          subs = ((pdata.get('subtitle') or {}).get('subtitles') or [])
+          transcript = []
+          for idx, sub in enumerate(subs):
+              u = sub.get('subtitle_url') or ''
+              if u.startswith('//'):
+                  u = 'https:' + u
+              if not u:
+                  continue
+              r = s.get(u, headers=headers, timeout=40)
+              if r.status_code != 200:
+                  continue
+              p = out / f'subtitle_{idx:02d}.json'
               p.write_bytes(r.content)
               try:
-                  sj=r.json()
-                  transcript.append(f"===== {sub.get('lan_doc') or sub.get('lan')} =====")
-                  for row in sj.get('body',[]):
+                  sj = r.json()
+                  transcript.append(f"===== {sub.get('lan_doc') or sub.get('lan') or 'subtitle'} =====")
+                  for row in sj.get('body', []):
                       transcript.append(f"[{row.get('from',0):.2f}-{row.get('to',0):.2f}] {row.get('content','')}")
               except Exception:
                   pass
-          (out/'transcript.txt').write_text('\n'.join(transcript) if transcript else 'NO_SUBTITLE_EXPOSED',encoding='utf-8')
 
-          # Fetch low-res progressive stream directly (DURL mode) for visual inspection.
-          play=get_json(f'https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&qn=32&fnval=0&fourk=0')
-          (out/'playurl.json').write_text(json.dumps(play,ensure_ascii=False,indent=2),encoding='utf-8')
-          durls=(play.get('data') or {}).get('durl') or []
+          if transcript:
+              (out / 'transcript.txt').write_text('\n'.join(transcript), encoding='utf-8')
+              (out / 'transcript_source.txt').write_text('bilibili_subtitle', encoding='utf-8')
+          else:
+              (out / 'transcript.txt').write_text('NO_SUBTITLE_EXPOSED', encoding='utf-8')
+              (out / 'transcript_source.txt').write_text('asr_required', encoding='utf-8')
+
+          # Progressive MP4 includes video + audio and is convenient for ASR/frames.
+          play = get_json(f'https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&qn=16&fnval=0&fourk=0')
+          (out / 'playurl.json').write_text(json.dumps(play, ensure_ascii=False, indent=2), encoding='utf-8')
+          durls = (play.get('data') or {}).get('durl') or []
           if not durls:
               raise RuntimeError('No progressive durl returned')
-          parts=[]
-          for i,d in enumerate(durls):
-              u=d['url']
-              r=s.get(u,headers={**headers,'Referer':f'https://www.bilibili.com/video/{bvid}/'},timeout=120)
+
+          parts = []
+          for i, d in enumerate(durls):
+              u = d['url']
+              r = s.get(u, headers=headers, timeout=180)
               r.raise_for_status()
-              p=out/f'part_{i:02d}.flv'
+              p = out / f'part_{i:02d}.mp4'
               p.write_bytes(r.content)
               parts.append(p)
-          (out/'concat.txt').write_text('\n'.join("file '"+p.name+"'" for p in parts),encoding='utf-8')
+              print('downloaded', p, len(r.content))
+
+          if len(parts) == 1:
+              (out / 'video.mp4').write_bytes(parts[0].read_bytes())
+          else:
+              (out / 'concat.txt').write_text('\n'.join("file '" + p.name + "'" for p in parts), encoding='utf-8')
           PY
 
-          cd bridge_out
-          ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i concat.txt -c copy video.mp4 || ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i concat.txt -c:v libx264 -c:a aac video.mp4
-          cd ..
-          ffmpeg -hide_banner -loglevel error -i bridge_out/video.mp4 -vf 'fps=1/5,scale=720:-2' -q:v 3 'bridge_out/frames/frame_%03d.jpg'
+          if [ -f bridge_out/concat.txt ]; then
+            (cd bridge_out && ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i concat.txt -c copy video.mp4) ||             (cd bridge_out && ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i concat.txt -c:v libx264 -c:a aac video.mp4)
+          fi
+
+          ffmpeg -hide_banner -loglevel error -i bridge_out/video.mp4 -vn -ac 1 -ar 16000 -c:a pcm_s16le bridge_out/audio.wav
+
+          # General visual sampling every 5 seconds.
+          ffmpeg -hide_banner -loglevel error -i bridge_out/video.mp4 -vf 'fps=1/5,scale=720:-2' -q:v 3 bridge_out/frames/frame_%03d.jpg
+
+          # Chapter boundary samples from Bilibili chapter metadata.
+          for pair in "000 0" "011 11" "038 38" "113 113" "141 141" "186 186"; do
+            set -- $pair
+            ffmpeg -hide_banner -loglevel error -ss "$2" -i bridge_out/video.mp4 -frames:v 1 -vf 'scale=960:-2' -q:v 2 "bridge_out/chapters/chapter_$1.jpg"
+          done
 
           python - <<'PY'
           from pathlib import Path
           from PIL import Image, ImageDraw
-          frames=sorted(Path('bridge_out/frames').glob('frame_*.jpg'))
-          cols,rows=4,4
-          cell_w,cell_h=720,440
-          for s in range(0,len(frames),cols*rows):
-              chunk=frames[s:s+cols*rows]
-              sheet=Image.new('RGB',(cols*cell_w,rows*cell_h),'white')
-              for i,p in enumerate(chunk):
-                  im=Image.open(p).convert('RGB')
-                  im.thumbnail((cell_w,cell_h-30))
-                  x=(i%cols)*cell_w+(cell_w-im.width)//2
-                  y=(i//cols)*cell_h
-                  sheet.paste(im,(x,y))
-                  ImageDraw.Draw(sheet).text(((i%cols)*cell_w+8,y+cell_h-25),p.stem,fill='black')
-              sheet.save(f'bridge_out/contact_{s//(cols*rows)+1:02d}.jpg',quality=90)
+
+          frames = sorted(Path('bridge_out/frames').glob('frame_*.jpg'))
+          cols, rows = 4, 4
+          cell_w, cell_h = 720, 440
+
+          for start in range(0, len(frames), cols * rows):
+              chunk = frames[start:start + cols * rows]
+              sheet = Image.new('RGB', (cols * cell_w, rows * cell_h), 'white')
+              for i, p in enumerate(chunk):
+                  im = Image.open(p).convert('RGB')
+                  im.thumbnail((cell_w, cell_h - 30))
+                  x = (i % cols) * cell_w + (cell_w - im.width) // 2
+                  y = (i // cols) * cell_h
+                  sheet.paste(im, (x, y))
+                  ImageDraw.Draw(sheet).text(((i % cols) * cell_w + 8, y + cell_h - 25), p.stem, fill='black')
+              sheet.save(f'bridge_out/contact_{start // (cols * rows) + 1:02d}.jpg', quality=90)
           PY
 
-          echo '===== TRANSCRIPT START ====='
-          cat bridge_out/transcript.txt
-          echo '===== TRANSCRIPT END ====='
-          ls -lah bridge_out bridge_out/frames
+      - name: ASR fallback when Bilibili subtitle is unavailable
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if grep -q '^NO_SUBTITLE_EXPOSED$' bridge_out/transcript.txt; then
+            python - <<'PY'
+            from faster_whisper import WhisperModel
+            from pathlib import Path
 
-      - name: Upload bridge artifact
+            model_name = 'small'
+            try:
+                model = WhisperModel(model_name, device='cpu', compute_type='int8')
+            except Exception:
+                model_name = 'base'
+                model = WhisperModel(model_name, device='cpu', compute_type='int8')
+
+            segments, info = model.transcribe(
+                'bridge_out/audio.wav',
+                language='zh',
+                beam_size=5,
+                vad_filter=True,
+                condition_on_previous_text=True,
+                initial_prompt='五星地牢，Godot，Shader，着色器，噪声，火焰，骷髅，灵魂火焰，像素游戏，独立游戏开发。'
+            )
+
+            lines = []
+            for seg in segments:
+                text = seg.text.strip()
+                if text:
+                    lines.append(f'[{seg.start:.2f}-{seg.end:.2f}] {text}')
+
+            Path('bridge_out/transcript.txt').write_text('\n'.join(lines), encoding='utf-8')
+            Path('bridge_out/transcript_source.txt').write_text(
+                f'faster-whisper:{model_name}; language={info.language}; probability={info.language_probability:.4f}',
+                encoding='utf-8'
+            )
+            print('\n'.join(lines))
+            PY
+          else
+            echo "Bilibili subtitle exposed; ASR skipped."
+          fi
+
+      - name: Build compact report
+        shell: bash
+        run: |
+          {
+            echo "BVID=BV1vGaT6FEMB"
+            echo "CID=42174056995"
+            echo "TITLE=让火焰烧起来 《五星地牢》开发日志04"
+            echo "DURATION=197s"
+            echo "TRANSCRIPT_SOURCE=$(cat bridge_out/transcript_source.txt)"
+            echo
+            echo "===== TRANSCRIPT ====="
+            cat bridge_out/transcript.txt
+          } > bridge_out/report.txt
+          sed -n '1,240p' bridge_out/report.txt
+
+      - name: Upload reader artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bilibili-psd-to-ai-bridge
+          name: bilibili-reader-BV1vGaT6FEMB
           path: |
-            bridge_out/metadata.json
-            bridge_out/player.json
+            bridge_out/report.txt
             bridge_out/transcript.txt
-            bridge_out/subtitle_*.json
+            bridge_out/transcript_source.txt
+            bridge_out/player.json
+            bridge_out/pagelist.json
+            bridge_out/chapters.json
             bridge_out/contact_*.jpg
+            bridge_out/chapters/*.jpg
           if-no-files-found: warn
           retention-days: 1
